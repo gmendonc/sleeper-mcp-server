@@ -1,0 +1,3 @@
+npm init -y
+npm install @modelcontextprotocol/sdk-typescript axios
+npm install -D typescript @types/node tsx nodemon
