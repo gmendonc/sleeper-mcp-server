@@ -1,3 +1,44 @@
-npm init -y
-npm install @modelcontextprotocol/sdk-typescript axios
-npm install -D typescript @types/node tsx nodemon
+{
+  "name": "sleeper-mcp-server",
+  "version": "1.0.0",
+  "description": "> **Multi-League Fantasy Football Management with AI** - An MCP server that auto-discovers all your Sleeper leagues and enables Claude to provide intelligent cross-league analysis, roster optimization, and strategic decision-making.",
+  "main": "index.js",
+  "type": "module",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "clean": "rm -rf dist",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gmendonc/sleeper-mcp-server.git"
+  },
+  "keywords": [
+    "fantasy",
+    "football",
+    "mcp",
+    "sleeper"
+  ],
+  "author": "gmendonc",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/gmendonc/sleeper-mcp-server/issues"
+  },
+  "homepage": "https://github.com/gmendonc/sleeper-mcp-server#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "nodemon": "^3.1.10",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
