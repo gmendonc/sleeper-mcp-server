@@ -110,3 +110,25 @@ export interface LeagueSummary {
   };
   league_id: string;
 }
+
+// Cross-league matchup analysis types
+export interface CrossLeagueMatchup {
+  league_name: string;
+  league_id: string;
+  matchup_id: number;
+  user_roster_id: number;
+  user_points: number;
+  opponent_points: number;
+  projected_difference: number;
+  competitiveness: 'high' | 'medium' | 'low';
+  priority: number;
+  opponent_roster_id?: number;
+}
+
+export interface MatchupAnalysis {
+  week: number;
+  total_matchups: number;
+  high_priority: CrossLeagueMatchup[];
+  medium_priority: CrossLeagueMatchup[];
+  low_priority: CrossLeagueMatchup[];
+}

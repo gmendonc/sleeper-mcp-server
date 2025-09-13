@@ -103,7 +103,21 @@ class SleeperMCPServer {
                     }
                 },
                 required: []
-            } 
+            }
+         },
+         {
+            name: 'get_cross_league_matchups',
+            description: 'Get matchup analysis across all user leagues for a specific week, prioritized by competitiveness',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    week: {
+                        type: 'number',
+                        description: 'NFL week number (1-18), defaults to week 1'
+                    }
+                },
+                required: []
+            }
          }
         ]
       };
@@ -148,17 +162,31 @@ class SleeperMCPServer {
             // For this tool, arguments are optional, but if they exist, validate them
             const args = request.params.arguments;
             let season: string | undefined;
-      
+
             if (args && typeof args === 'object') {
                 const providedSeason = (args as any).season;
                 if (providedSeason && typeof providedSeason === 'string') {
                     season = providedSeason;
                 }
             }
-      
+
             return this.sleeperTools.discoverUserLeagues(season);
         }
-        
+        case 'get_cross_league_matchups': {
+            // For this tool, arguments are optional, but if they exist, validate them
+            const args = request.params.arguments;
+            let week: number | undefined;
+
+            if (args && typeof args === 'object') {
+                const providedWeek = (args as any).week;
+                if (providedWeek && typeof providedWeek === 'number') {
+                    week = providedWeek;
+                }
+            }
+
+            return this.sleeperTools.getCrossLeagueMatchups(week);
+        }
+
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,

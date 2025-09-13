@@ -1,9 +1,12 @@
 import { SleeperAPI } from './sleeper-api.js';
-import type { 
+import type {
   SleeperLeague,
-  SleeperRoster, 
+  SleeperRoster,
   EnrichedLeague,
-  LeagueSummary
+  LeagueSummary,
+  CrossLeagueMatchup,
+  MatchupAnalysis,
+  SleeperMatchup
  } from './types.js';
 
 export class SleeperTools {
@@ -194,6 +197,168 @@ export class SleeperTools {
       };
     } catch (error) {
       throw new Error(`Failed to discover leagues: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Get cross-league matchup analysis for a specific week
+   * This tool helps prioritize which leagues need attention based on matchup competitiveness
+   */
+  async getCrossLeagueMatchups(week?: number) {
+    try {
+      const configuredSeason = process.env.NFL_SEASON || '2025';
+      const userId = process.env.SLEEPER_USER_ID;
+
+      if (!userId) {
+        throw new Error('User ID not configured');
+      }
+
+      // Default to week 1 if not specified
+      const targetWeek = week || 1;
+
+      // Get all user leagues
+      const leagues = await this.sleeperAPI.getUserLeagues(userId, configuredSeason);
+
+      if (leagues.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No leagues found for user ${userId} in ${configuredSeason} season.`
+            }
+          ]
+        };
+      }
+
+      // Fetch matchups and rosters for each league in parallel
+      const leagueMatchupPromises = leagues.map(async (league) => {
+        try {
+          const [matchups, rosters] = await Promise.all([
+            this.sleeperAPI.getMatchups(league.league_id, targetWeek),
+            this.sleeperAPI.getLeagueRosters(league.league_id)
+          ]);
+
+          // Find user's roster
+          const userRoster = rosters.find(roster => roster.owner_id === userId);
+          if (!userRoster) {
+            return null; // User not in this league
+          }
+
+          // Find user's matchup
+          const userMatchup = matchups.find(matchup => matchup.roster_id === userRoster.roster_id);
+          if (!userMatchup) {
+            return null; // No matchup data for this week
+          }
+
+          // Find opponent's matchup (same matchup_id, different roster_id)
+          const opponentMatchup = matchups.find(
+            matchup => matchup.matchup_id === userMatchup.matchup_id &&
+                      matchup.roster_id !== userMatchup.roster_id
+          );
+
+          if (!opponentMatchup) {
+            return null; // No opponent found (bye week or incomplete data)
+          }
+
+          // Calculate competitiveness based on point differential
+          const pointDifference = Math.abs(userMatchup.points - opponentMatchup.points);
+          let competitiveness: 'high' | 'medium' | 'low';
+          let priority: number;
+
+          if (pointDifference < 10) {
+            competitiveness = 'high';
+            priority = 1;
+          } else if (pointDifference < 20) {
+            competitiveness = 'medium';
+            priority = 2;
+          } else {
+            competitiveness = 'low';
+            priority = 3;
+          }
+
+          const crossLeagueMatchup: CrossLeagueMatchup = {
+            league_name: league.name,
+            league_id: league.league_id,
+            matchup_id: userMatchup.matchup_id,
+            user_roster_id: userMatchup.roster_id,
+            user_points: userMatchup.points,
+            opponent_points: opponentMatchup.points,
+            projected_difference: userMatchup.points - opponentMatchup.points,
+            competitiveness,
+            priority,
+            opponent_roster_id: opponentMatchup.roster_id
+          };
+
+          return crossLeagueMatchup;
+        } catch (error) {
+          console.error(`Error getting matchups for league ${league.league_id}:`, error);
+          return null;
+        }
+      });
+
+      // Wait for all league matchups to complete
+      const allMatchups = await Promise.all(leagueMatchupPromises);
+
+      // Filter out null results and sort by priority
+      const validMatchups = allMatchups.filter((matchup): matchup is CrossLeagueMatchup => matchup !== null);
+      validMatchups.sort((a, b) => a.priority - b.priority);
+
+      // Categorize matchups by priority
+      const highPriority = validMatchups.filter(m => m.competitiveness === 'high');
+      const mediumPriority = validMatchups.filter(m => m.competitiveness === 'medium');
+      const lowPriority = validMatchups.filter(m => m.competitiveness === 'low');
+
+      const analysis: MatchupAnalysis = {
+        week: targetWeek,
+        total_matchups: validMatchups.length,
+        high_priority: highPriority,
+        medium_priority: mediumPriority,
+        low_priority: lowPriority
+      };
+
+      // Format response
+      const formatMatchup = (matchup: CrossLeagueMatchup) => {
+        const isWinning = matchup.projected_difference > 0;
+        const winChance = isWinning ?
+          `${Math.min(95, 50 + (matchup.projected_difference / 2))}%` :
+          `${Math.max(5, 50 + (matchup.projected_difference / 2))}%`;
+
+        return `- **${matchup.league_name}**: ${matchup.user_points} vs ${matchup.opponent_points} ` +
+               `(${isWinning ? '+' : ''}${matchup.projected_difference.toFixed(1)} pts, ~${winChance} chance)`;
+      };
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `# Cross-League Matchups - Week ${targetWeek}\n\n` +
+                  `**Total Matchups:** ${analysis.total_matchups}\n\n` +
+
+                  (analysis.high_priority.length > 0 ?
+                    `## 🔥 High Priority (Close Games - <10 pt difference)\n` +
+                    `${analysis.high_priority.map(formatMatchup).join('\n')}\n\n` : '') +
+
+                  (analysis.medium_priority.length > 0 ?
+                    `## ⚡ Medium Priority (Moderate Games - 10-20 pt difference)\n` +
+                    `${analysis.medium_priority.map(formatMatchup).join('\n')}\n\n` : '') +
+
+                  (analysis.low_priority.length > 0 ?
+                    `## ✅ Low Priority (Decided Games - >20 pt difference)\n` +
+                    `${analysis.low_priority.map(formatMatchup).join('\n')}\n\n` : '') +
+
+                  `## 🎯 Action Items\n` +
+                  (analysis.high_priority.length > 0 ?
+                    `- **Focus attention** on ${analysis.high_priority.map(m => m.league_name).join(', ')} - these games are very close!\n` : '') +
+                  (analysis.medium_priority.length > 0 ?
+                    `- **Monitor closely** ${analysis.medium_priority.map(m => m.league_name).join(', ')} - winnable with right moves\n` : '') +
+                  (analysis.low_priority.length > 0 ?
+                    `- **Autopilot mode** for ${analysis.low_priority.map(m => m.league_name).join(', ')} - likely outcomes determined\n` : '') +
+                  `\n**Recommendation:** Prioritize waiver claims and lineup optimization for high-priority leagues first.`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`Failed to get cross-league matchups: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 }
