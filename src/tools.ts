@@ -2,11 +2,16 @@ import { SleeperAPI } from './sleeper-api.js';
 import type {
   SleeperLeague,
   SleeperRoster,
+  SleeperPlayer,
   EnrichedLeague,
   LeagueSummary,
   CrossLeagueMatchup,
   MatchupAnalysis,
-  SleeperMatchup
+  SleeperMatchup,
+  EnrichedRosterPlayer,
+  PositionDepth,
+  RosterAnalysis,
+  MultiRosterComparison
  } from './types.js';
 
 export class SleeperTools {
@@ -121,7 +126,6 @@ export class SleeperTools {
             return enrichedLeague;
           } catch (error) {
             // If we can't get roster data, still include the league
-            console.error(`Could not get roster data for league ${league.league_id}:`, error);
             return {
               ...league,
               user_roster_id: undefined,
@@ -291,7 +295,6 @@ export class SleeperTools {
 
           return crossLeagueMatchup;
         } catch (error) {
-          console.error(`Error getting matchups for league ${league.league_id}:`, error);
           return null;
         }
       });
@@ -359,6 +362,454 @@ export class SleeperTools {
       };
     } catch (error) {
       throw new Error(`Failed to get cross-league matchups: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Enrich players array with detailed player information
+   */
+  private async enrichPlayers(playerIds: string[], starterIds: string[]): Promise<EnrichedRosterPlayer[]> {
+    // First, ensure we have player data by trying to fetch it
+    try {
+      await this.sleeperAPI.getPlayers();
+    } catch (error) {
+      throw new Error('Player cache needs to be refreshed. Use the "manage_player_cache" tool with action "refresh" first.');
+    }
+
+    const playersData = await this.sleeperAPI.getPlayersByIds(playerIds);
+
+    const enrichedPlayers = playerIds
+      .map(playerId => {
+        const player = playersData.get(playerId);
+        if (!player) {
+          // Create a placeholder for unknown players but still include them
+          return {
+            player_id: playerId,
+            full_name: `Unknown Player (${playerId})`,
+            position: 'FLEX', // Use FLEX instead of UNKNOWN so they don't get filtered
+            team: 'N/A',
+            status: 'Inactive' as const,
+            fantasy_positions: ['FLEX'],
+            is_starter: starterIds.includes(playerId)
+          };
+        }
+
+        return {
+          player_id: player.player_id,
+          full_name: player.full_name || `${player.first_name || ''} ${player.last_name || ''}`.trim() || 'Unknown',
+          position: player.position || 'FLEX',
+          team: player.team || 'N/A',
+          status: player.status || 'Inactive',
+          fantasy_positions: player.fantasy_positions || ['FLEX'],
+          is_starter: starterIds.includes(playerId)
+        };
+      });
+
+    return enrichedPlayers;
+  }
+
+  /**
+   * Group players by position and analyze depth
+   */
+  private groupPlayersByPosition(players: EnrichedRosterPlayer[], rosterPositions: string[]): PositionDepth[] {
+    // Standard fantasy positions to analyze
+    const positions = ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
+
+    return positions.map(position => {
+      const positionPlayers = players.filter(player =>
+        player.position === position || player.fantasy_positions.includes(position)
+      );
+
+      const starters = positionPlayers.filter(player => player.is_starter);
+      const bench = positionPlayers.filter(player => !player.is_starter);
+
+      // Calculate depth score based on total players and starter quality
+      let depthScore = 0;
+      depthScore += starters.length * 3; // Starters are worth 3 points each
+      depthScore += bench.length * 1; // Bench players are worth 1 point each
+
+      // Adjust for position scarcity
+      if (position === 'QB') {
+        depthScore *= 0.8; // QBs are less critical in numbers
+      } else if (position === 'RB' || position === 'WR') {
+        depthScore *= 1.2; // RBs and WRs are more critical
+      }
+
+      // Determine strength category
+      let strength: 'Strong' | 'Average' | 'Weak';
+      if (position === 'QB') {
+        strength = positionPlayers.length >= 2 ? 'Strong' : positionPlayers.length >= 1 ? 'Average' : 'Weak';
+      } else if (position === 'K' || position === 'DEF') {
+        strength = positionPlayers.length >= 2 ? 'Strong' : positionPlayers.length >= 1 ? 'Average' : 'Weak';
+      } else {
+        // RB, WR, TE
+        strength = positionPlayers.length >= 4 ? 'Strong' : positionPlayers.length >= 2 ? 'Average' : 'Weak';
+      }
+
+      return {
+        position,
+        starters,
+        bench,
+        total_count: positionPlayers.length,
+        starter_count: starters.length,
+        bench_count: bench.length,
+        strength,
+        depth_score: Math.round(depthScore)
+      };
+    });
+  }
+
+  /**
+   * Analyze a single roster for strengths and weaknesses
+   */
+  private analyzeRoster(
+    league: SleeperLeague,
+    roster: SleeperRoster,
+    enrichedPlayers: EnrichedRosterPlayer[]
+  ): RosterAnalysis {
+    const positions = this.groupPlayersByPosition(enrichedPlayers, league.roster_positions);
+
+    const starters = enrichedPlayers.filter(player => player.is_starter);
+    const bench = enrichedPlayers.filter(player => !player.is_starter);
+
+    // Identify strengths and weaknesses
+    const strengths: string[] = [];
+    const weaknesses: string[] = [];
+    const priorityPositions: string[] = [];
+
+    positions.forEach(pos => {
+      if (pos.strength === 'Strong') {
+        strengths.push(`${pos.position} (${pos.total_count} players)`);
+      } else if (pos.strength === 'Weak') {
+        weaknesses.push(`${pos.position} (${pos.total_count} players)`);
+        priorityPositions.push(pos.position);
+      }
+    });
+
+    // Calculate overall team strength
+    const avgDepthScore = positions.reduce((sum, pos) => sum + pos.depth_score, 0) / positions.length;
+    const strongPositions = positions.filter(pos => pos.strength === 'Strong').length;
+    const weakPositions = positions.filter(pos => pos.strength === 'Weak').length;
+
+    let overallStrength: 'Strong' | 'Average' | 'Weak';
+    if (strongPositions >= 4 && weakPositions <= 1) {
+      overallStrength = 'Strong';
+    } else if (weakPositions >= 3) {
+      overallStrength = 'Weak';
+    } else {
+      overallStrength = 'Average';
+    }
+
+    return {
+      league_id: league.league_id,
+      league_name: league.name,
+      roster_id: roster.roster_id,
+      team_record: {
+        wins: roster.settings.wins,
+        losses: roster.settings.losses,
+        ties: roster.settings.ties,
+        points_for: roster.settings.fpts,
+        points_against: roster.settings.fpts_against
+      },
+      positions,
+      total_players: enrichedPlayers.length,
+      starters,
+      bench,
+      strengths,
+      weaknesses,
+      priority_positions: priorityPositions,
+      overall_strength: overallStrength
+    };
+  }
+
+  /**
+   * Generate cross-league comparison and recommendations
+   */
+  private generateMultiRosterComparison(rosterAnalyses: RosterAnalysis[]): MultiRosterComparison {
+    const positions = ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
+
+    const positionAnalysis = positions.map(position => {
+      const positionData = rosterAnalyses
+        .map(roster => {
+          const positionDepth = roster.positions.find(pos => pos.position === position);
+          return positionDepth ? { roster, positionDepth } : null;
+        })
+        .filter((data): data is { roster: RosterAnalysis; positionDepth: PositionDepth } => data !== null);
+
+      if (positionData.length === 0) {
+        // Fallback for positions with no data
+        return {
+          position,
+          strongest_team: {
+            league_name: 'N/A',
+            league_id: 'N/A',
+            depth_score: 0
+          },
+          weakest_team: {
+            league_name: 'N/A',
+            league_id: 'N/A',
+            depth_score: 0
+          },
+          average_depth: 0
+        };
+      }
+
+      const sortedByDepth = positionData.sort((a, b) => b.positionDepth.depth_score - a.positionDepth.depth_score);
+      const averageDepth = positionData.reduce((sum, data) => sum + data.positionDepth.depth_score, 0) / positionData.length;
+
+      const strongest = sortedByDepth[0];
+      const weakest = sortedByDepth[sortedByDepth.length - 1];
+
+      return {
+        position,
+        strongest_team: {
+          league_name: strongest?.roster.league_name || 'N/A',
+          league_id: strongest?.roster.league_id || 'N/A',
+          depth_score: strongest?.positionDepth.depth_score || 0
+        },
+        weakest_team: {
+          league_name: weakest?.roster.league_name || 'N/A',
+          league_id: weakest?.roster.league_id || 'N/A',
+          depth_score: weakest?.positionDepth.depth_score || 0
+        },
+        average_depth: Math.round(averageDepth)
+      };
+    });
+
+    // Generate overall recommendations
+    const recommendations: MultiRosterComparison['overall_recommendations'] = [];
+
+    // Find positions that are weak across multiple teams
+    positions.forEach(position => {
+      const weakTeams = rosterAnalyses.filter(roster =>
+        roster.positions.find(pos => pos.position === position)?.strength === 'Weak'
+      );
+
+      if (weakTeams.length >= 2) {
+        recommendations.push({
+          position,
+          reason: `${weakTeams.length} of your teams need ${position} depth`,
+          affected_teams: weakTeams.map(team => team.league_name)
+        });
+      }
+    });
+
+    // Sort teams by overall strength
+    const teamRankings = rosterAnalyses
+      .map(roster => ({
+        league_name: roster.league_name,
+        league_id: roster.league_id,
+        overall_strength: roster.overall_strength,
+        strengths: roster.strengths,
+        weaknesses: roster.weaknesses
+      }))
+      .sort((a, b) => {
+        const strengthOrder = { 'Strong': 3, 'Average': 2, 'Weak': 1 };
+        return strengthOrder[b.overall_strength] - strengthOrder[a.overall_strength];
+      });
+
+    const totalPlayers = rosterAnalyses.reduce((sum, roster) => sum + roster.total_players, 0);
+
+    return {
+      total_teams: rosterAnalyses.length,
+      total_players: totalPlayers,
+      position_analysis: positionAnalysis,
+      overall_recommendations: recommendations,
+      team_rankings: teamRankings
+    };
+  }
+
+  /**
+   * Get comprehensive multi-roster analysis across all user teams
+   */
+  async getMultiRosterAnalysis() {
+    try {
+      const configuredSeason = process.env.NFL_SEASON || '2025';
+      const userId = process.env.SLEEPER_USER_ID;
+
+      if (!userId) {
+        throw new Error('User ID not configured');
+      }
+
+      // Get all user leagues
+      const leagues = await this.sleeperAPI.getUserLeagues(userId, configuredSeason);
+
+      if (leagues.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No leagues found for user ${userId} in ${configuredSeason} season.`
+            }
+          ]
+        };
+      }
+
+      // Analyze each roster in parallel
+      const rosterAnalysisPromises = leagues.map(async (league) => {
+        try {
+          const rosters = await this.sleeperAPI.getLeagueRosters(league.league_id);
+          const userRoster = rosters.find(roster => roster.owner_id === userId);
+
+          if (!userRoster) {
+            return null; // User not in this league
+          }
+
+          // Get all players (combine starters and players arrays to handle both)
+          const allPlayerIds = Array.from(new Set([...(userRoster.players || []), ...(userRoster.starters || [])]));
+
+          const enrichedPlayers = await this.enrichPlayers(allPlayerIds, userRoster.starters || []);
+
+          return this.analyzeRoster(league, userRoster, enrichedPlayers);
+        } catch (error) {
+          return null;
+        }
+      });
+
+      // Wait for all analyses to complete
+      const allRosterAnalyses = await Promise.all(rosterAnalysisPromises);
+      const validAnalyses = allRosterAnalyses.filter((analysis): analysis is RosterAnalysis => analysis !== null);
+
+      if (validAnalyses.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No roster data found for your leagues. This could indicate an issue with the player cache or API connectivity.'
+            }
+          ]
+        };
+      }
+
+      // Generate cross-league comparison
+      const comparison = this.generateMultiRosterComparison(validAnalyses);
+
+      // Format the comprehensive response
+      const formatPositionAnalysis = (pos: typeof comparison.position_analysis[0]) => {
+        return `**${pos.position}**\n` +
+               `  - Strongest: ${pos.strongest_team.league_name} (${pos.strongest_team.depth_score} depth)\n` +
+               `  - Weakest: ${pos.weakest_team.league_name} (${pos.weakest_team.depth_score} depth)\n` +
+               `  - Average: ${pos.average_depth} depth\n`;
+      };
+
+      const formatTeamRanking = (team: typeof comparison.team_rankings[0], index: number) => {
+        const strengthEmoji = { 'Strong': '💪', 'Average': '⚖️', 'Weak': '⚠️' };
+
+        // Find the corresponding roster analysis to get player details
+        const rosterAnalysis = validAnalyses.find(r => r.league_id === team.league_id);
+        let startersList = '';
+
+        if (rosterAnalysis && rosterAnalysis.starters.length > 0) {
+          const topStarters = rosterAnalysis.starters
+            .slice(0, 5) // Show first 5 starters
+            .map(p => `${p.full_name} (${p.position})`)
+            .join(', ');
+          startersList = `   - Key Starters: ${topStarters}\n`;
+        }
+
+        return `${index + 1}. ${strengthEmoji[team.overall_strength]} **${team.league_name}** (${team.overall_strength})\n` +
+               startersList +
+               (team.strengths.length > 0 ? `   - Strengths: ${team.strengths.join(', ')}\n` : '') +
+               (team.weaknesses.length > 0 ? `   - Weaknesses: ${team.weaknesses.join(', ')}\n` : '');
+      };
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `# Multi-Roster Analysis - ${configuredSeason} Season\n\n` +
+                  `**Total Teams:** ${comparison.total_teams}\n` +
+                  `**Total Players:** ${comparison.total_players}\n\n` +
+
+                  `## Position-by-Position Breakdown\n\n` +
+                  comparison.position_analysis.map(formatPositionAnalysis).join('\n') +
+
+                  `\n## Team Rankings by Overall Strength\n\n` +
+                  comparison.team_rankings.map(formatTeamRanking).join('\n') +
+
+                  `\n## 🎯 Priority Recommendations\n\n` +
+                  (comparison.overall_recommendations.length > 0 ?
+                    comparison.overall_recommendations.map(rec =>
+                      `**${rec.position}**: ${rec.reason}\n` +
+                      `  - Affected teams: ${rec.affected_teams.join(', ')}\n`
+                    ).join('\n') :
+                    'Your roster composition is well-balanced across all leagues!\n') +
+
+                  `\n## 🚀 Action Items\n` +
+                  `- **Waiver Priority**: Target ${comparison.overall_recommendations.slice(0, 2).map(r => r.position).join(', ') || 'depth at skill positions'}\n` +
+                  `- **Trade Focus**: Use depth from strongest teams to improve weakest teams\n` +
+                  `- **Attention Priority**: Focus lineup optimization on your strongest teams first\n\n` +
+                  `💡 **Pro Tip**: Consider cross-league trades if your leagues allow it, or use this analysis to prioritize which leagues get your attention during busy weeks.`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`Failed to get multi-roster analysis: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Manage player cache - useful for debugging and maintenance
+   */
+  async managePlayerCache(action: 'status' | 'refresh' | 'clear' = 'status') {
+    try {
+      switch (action) {
+        case 'status': {
+          const status = await this.sleeperAPI.getPlayerCacheStatus();
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `# Player Cache Status\n\n` +
+                      `**Exists:** ${status.exists ? 'Yes' : 'No'}\n` +
+                      `**Last Updated:** ${status.lastUpdated ? status.lastUpdated.toLocaleString() : 'Never'}\n` +
+                      `**Is Expired:** ${status.isExpired ? 'Yes' : 'No'}\n` +
+                      `**Player Count:** ${status.playerCount.toLocaleString()}\n` +
+                      `**File Size:** ${status.fileSizeMB.toFixed(1)} MB\n\n` +
+
+                      (status.isExpired ?
+                        `⚠️ **Cache is expired** - Next roster analysis will fetch fresh data from Sleeper API\n` :
+                        `✅ **Cache is current** - Roster analysis will use cached player data\n`) +
+
+                      `\n💡 **Note**: Player data is cached for 24 hours to comply with Sleeper API guidelines`
+              }
+            ]
+          };
+        }
+
+        case 'refresh': {
+          await this.sleeperAPI.refreshPlayerCache();
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `# Player Cache Refreshed\n\n` +
+                      `✅ **Cache cleared** - Next roster analysis will fetch fresh data from Sleeper API\n\n` +
+                      `This will trigger a ~5MB download from Sleeper the next time roster analysis runs.`
+              }
+            ]
+          };
+        }
+
+        case 'clear': {
+          await this.sleeperAPI.refreshPlayerCache();
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `# Player Cache Cleared\n\n` +
+                      `🗑️ **Cache files removed** - Next roster analysis will fetch fresh data\n\n` +
+                      `Use this if you're experiencing issues with player data or want to force a refresh.`
+              }
+            ]
+          };
+        }
+
+        default:
+          throw new Error('Invalid cache action. Use: status, refresh, or clear');
+      }
+    } catch (error) {
+      throw new Error(`Failed to manage player cache: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 }

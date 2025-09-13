@@ -118,6 +118,31 @@ class SleeperMCPServer {
                 },
                 required: []
             }
+         },
+         {
+            name: 'get_multi_roster_analysis',
+            description: 'Analyze roster composition across all user teams, identifying positional strengths/weaknesses and providing cross-league roster comparisons with actual player names',
+            inputSchema: {
+                type: 'object',
+                properties: {},
+                required: []
+            }
+         },
+         {
+            name: 'manage_player_cache',
+            description: 'Manage the player database cache (status/refresh/clear) - useful for debugging and ensuring fresh player data',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    action: {
+                        type: 'string',
+                        description: 'Action to perform: status (default), refresh, or clear',
+                        enum: ['status', 'refresh', 'clear'],
+                        default: 'status'
+                    }
+                },
+                required: []
+            }
          }
         ]
       };
@@ -185,6 +210,26 @@ class SleeperMCPServer {
             }
 
             return this.sleeperTools.getCrossLeagueMatchups(week);
+        }
+        case 'get_multi_roster_analysis': {
+            // No arguments needed for this tool
+            return this.sleeperTools.getMultiRosterAnalysis();
+        }
+        case 'manage_player_cache': {
+            // Arguments are optional, but if they exist, validate them
+            const args = request.params.arguments;
+            let action: 'status' | 'refresh' | 'clear' = 'status';
+
+            if (args && typeof args === 'object') {
+                const providedAction = (args as any).action;
+                if (providedAction && typeof providedAction === 'string') {
+                    if (['status', 'refresh', 'clear'].includes(providedAction)) {
+                        action = providedAction as 'status' | 'refresh' | 'clear';
+                    }
+                }
+            }
+
+            return this.sleeperTools.managePlayerCache(action);
         }
 
         default:

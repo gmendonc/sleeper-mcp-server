@@ -132,3 +132,77 @@ export interface MatchupAnalysis {
   medium_priority: CrossLeagueMatchup[];
   low_priority: CrossLeagueMatchup[];
 }
+
+// Multi-roster analysis types
+export interface EnrichedRosterPlayer {
+  player_id: string;
+  full_name: string;
+  position: string;
+  team: string;
+  status: 'Active' | 'Inactive' | 'IR' | 'PUP';
+  fantasy_positions: string[];
+  is_starter: boolean;
+}
+
+export interface PositionDepth {
+  position: string;
+  starters: EnrichedRosterPlayer[];
+  bench: EnrichedRosterPlayer[];
+  total_count: number;
+  starter_count: number;
+  bench_count: number;
+  strength: 'Strong' | 'Average' | 'Weak';
+  depth_score: number;
+}
+
+export interface RosterAnalysis {
+  league_id: string;
+  league_name: string;
+  roster_id: number;
+  team_record?: {
+    wins: number;
+    losses: number;
+    ties: number;
+    points_for: number;
+    points_against: number;
+  };
+  positions: PositionDepth[];
+  total_players: number;
+  starters: EnrichedRosterPlayer[];
+  bench: EnrichedRosterPlayer[];
+  strengths: string[];
+  weaknesses: string[];
+  priority_positions: string[];
+  overall_strength: 'Strong' | 'Average' | 'Weak';
+}
+
+export interface MultiRosterComparison {
+  total_teams: number;
+  total_players: number;
+  position_analysis: {
+    position: string;
+    strongest_team: {
+      league_name: string;
+      league_id: string;
+      depth_score: number;
+    };
+    weakest_team: {
+      league_name: string;
+      league_id: string;
+      depth_score: number;
+    };
+    average_depth: number;
+  }[];
+  overall_recommendations: {
+    position: string;
+    reason: string;
+    affected_teams: string[];
+  }[];
+  team_rankings: {
+    league_name: string;
+    league_id: string;
+    overall_strength: 'Strong' | 'Average' | 'Weak';
+    strengths: string[];
+    weaknesses: string[];
+  }[];
+}

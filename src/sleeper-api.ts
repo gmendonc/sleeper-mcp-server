@@ -1,10 +1,12 @@
 import axios, { type AxiosInstance, AxiosError } from 'axios';
 import type { SleeperUser, SleeperLeague, SleeperRoster, SleeperPlayer, SleeperMatchup, CacheEntry } from './types.js';
+import { PlayerCache } from './player-cache.js';
 
 export class SleeperAPI {
   private client: AxiosInstance;
   private cache: Map<string, CacheEntry<any>> = new Map();
   private cacheDuration: number;
+  private playerCache: PlayerCache;
 
   constructor(cacheDurationMinutes: number = 5) {
     // Create axios instance with Sleeper API base configuration
@@ -17,6 +19,7 @@ export class SleeperAPI {
     });
 
     this.cacheDuration = cacheDurationMinutes * 60 * 1000; // Convert to milliseconds
+    this.playerCache = new PlayerCache();
     
     // Add response interceptor for error handling
     this.client.interceptors.response.use(
@@ -126,6 +129,73 @@ export class SleeperAPI {
       const response = await this.client.get(`/league/${leagueId}/matchups/${week}`);
       return response.data || [];
     });
+  }
+
+  /**
+   * Get all players from Sleeper API with smart caching
+   * This endpoint returns ~5MB of data and should only be called once per day
+   */
+  async getPlayers(): Promise<Map<string, SleeperPlayer>> {
+    // Try to load from cache first
+    const cachedPlayers = await this.playerCache.loadPlayersFromCache();
+    if (cachedPlayers) {
+      return cachedPlayers;
+    }
+
+    // If cache is expired or doesn't exist, fetch from API
+    try {
+      const response = await this.client.get('/players/nfl');
+      const playersData = response.data;
+
+      // Save to persistent cache
+      await this.playerCache.savePlayersToCache(playersData);
+
+      // Return as Map
+      const playersMap = new Map<string, SleeperPlayer>();
+      for (const [playerId, player] of Object.entries(playersData)) {
+        playersMap.set(playerId, player as SleeperPlayer);
+      }
+
+      return playersMap;
+    } catch (error) {
+      throw new Error(`Unable to fetch player data from Sleeper API: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Get specific players by their IDs
+   */
+  async getPlayersByIds(playerIds: string[]): Promise<Map<string, SleeperPlayer>> {
+    return await this.playerCache.getPlayers(playerIds);
+  }
+
+  /**
+   * Get a single player by ID
+   */
+  async getPlayer(playerId: string): Promise<SleeperPlayer | null> {
+    return await this.playerCache.getPlayer(playerId);
+  }
+
+  /**
+   * Search players by name (useful for debugging)
+   */
+  async searchPlayers(searchTerm: string, limit: number = 10): Promise<SleeperPlayer[]> {
+    return await this.playerCache.searchPlayersByName(searchTerm, limit);
+  }
+
+  /**
+   * Get player cache status for debugging and management
+   */
+  async getPlayerCacheStatus() {
+    return await this.playerCache.getCacheStatus();
+  }
+
+  /**
+   * Force refresh the player cache
+   */
+  async refreshPlayerCache(): Promise<void> {
+    await this.playerCache.refreshCache();
+    // This will trigger a fresh fetch on the next getPlayers() call
   }
 
   /**
