@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import type { SleeperPlayer } from './types.js';
 
 export interface PlayerCacheStatus {
@@ -16,8 +17,11 @@ export class PlayerCache {
   private playersCache: Map<string, SleeperPlayer> | null = null;
 
   constructor(dataDir: string = 'data') {
-    // Use absolute path to ensure cache works regardless of working directory
-    const absoluteDataDir = path.isAbsolute(dataDir) ? dataDir : path.join(process.cwd(), dataDir);
+    // Corrija o __dirname para ES Modules
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const absoluteDataDir = path.isAbsolute(dataDir)
+      ? dataDir
+      : path.join(__dirname, '..', dataDir); // Agora funciona em ES Modules
     this.cacheFilePath = path.join(absoluteDataDir, 'players.json');
 
     // Ensure data directory exists synchronously
@@ -125,6 +129,8 @@ export class PlayerCache {
    */
   async savePlayersToCache(players: Record<string, SleeperPlayer>): Promise<void> {
     try {
+      console.log(`Saving ${Object.keys(players).length} players to cache at ${this.cacheFilePath}`);
+
       // Ensure the data directory exists
       await fs.mkdir(path.dirname(this.cacheFilePath), { recursive: true });
 
@@ -135,6 +141,7 @@ export class PlayerCache {
         // Test that we can parse it back
         JSON.parse(jsonString);
       } catch (jsonError) {
+        console.error('Invalid JSON data, cannot save to cache:', jsonError);
         throw new Error('Player data contains invalid JSON');
       }
 
@@ -146,7 +153,9 @@ export class PlayerCache {
       try {
         const testRead = await fs.readFile(tempFilePath, 'utf8');
         JSON.parse(testRead);
+        console.log('Cache file verified successfully');
       } catch (verifyError) {
+        console.error('Cache file verification failed:', verifyError);
         throw new Error('Cache file is corrupted after writing');
       }
 
@@ -157,7 +166,11 @@ export class PlayerCache {
       for (const [playerId, player] of Object.entries(players)) {
         this.playersCache.set(playerId, player);
       }
+
+      console.log(`Player cache saved successfully with ${Object.keys(players).length} players`);
     } catch (error) {
+      console.error('Failed to save players to cache:', error);
+
       // Clean up temp file if it exists
       try {
         await fs.unlink(`${this.cacheFilePath}.tmp`);
