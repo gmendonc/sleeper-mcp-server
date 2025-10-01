@@ -124,9 +124,22 @@ export class SleeperAPI {
    */
   async getMatchups(leagueId: string, week: number): Promise<SleeperMatchup[]> {
     const cacheKey = `matchups:${leagueId}:${week}`;
-    
+
     return this.getCached(cacheKey, async () => {
       const response = await this.client.get(`/league/${leagueId}/matchups/${week}`);
+      return response.data || [];
+    });
+  }
+
+  /**
+   * Get all users in a league
+   * This provides owner information for rosters
+   */
+  async getLeagueUsers(leagueId: string): Promise<SleeperUser[]> {
+    const cacheKey = `league_users:${leagueId}`;
+
+    return this.getCached(cacheKey, async () => {
+      const response = await this.client.get(`/league/${leagueId}/users`);
       return response.data || [];
     });
   }

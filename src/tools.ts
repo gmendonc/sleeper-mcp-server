@@ -3,6 +3,7 @@ import type {
   SleeperLeague,
   SleeperRoster,
   SleeperPlayer,
+  SleeperUser,
   EnrichedLeague,
   LeagueSummary,
   CrossLeagueMatchup,
@@ -745,6 +746,328 @@ export class SleeperTools {
       };
     } catch (error) {
       throw new Error(`Failed to get multi-roster analysis: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Format all rosters in a league as a summary view
+   * Useful for evaluating matchups and trade opportunities
+   */
+  private async formatAllRosters(
+    league: SleeperLeague,
+    rosters: SleeperRoster[],
+    users: SleeperUser[],
+    userId: string
+  ) {
+    // Limit to 16 teams max
+    const rostersToShow = rosters.slice(0, 16);
+
+    // Enrich all rosters with player data and owner info
+    const enrichedRosterData = await Promise.all(
+      rostersToShow.map(async (roster) => {
+        const owner = users.find(u => u.user_id === roster.owner_id);
+        const ownerName = owner?.display_name || owner?.username || 'Unknown Owner';
+        const isUserRoster = roster.owner_id === userId;
+
+        // Get all unique player IDs
+        const allPlayerIds = Array.from(new Set([...(roster.players || []), ...(roster.starters || [])]));
+
+        if (allPlayerIds.length === 0) {
+          return {
+            roster,
+            ownerName,
+            isUserRoster,
+            enrichedPlayers: [],
+            starters: [],
+            bench: [],
+            keyPlayers: []
+          };
+        }
+
+        // Enrich players
+        const enrichedPlayers = await this.enrichPlayers(allPlayerIds, roster.starters || []);
+        const starters = enrichedPlayers.filter(p => p.is_starter);
+        const bench = enrichedPlayers.filter(p => !p.is_starter);
+
+        // Get key players (top 3 starters by position importance: QB > RB > WR > TE)
+        const positionPriority: { [key: string]: number } = {
+          'QB': 1, 'RB': 2, 'WR': 3, 'TE': 4, 'K': 5, 'DEF': 6
+        };
+
+        const keyPlayers = starters
+          .sort((a, b) => {
+            const aPriority = positionPriority[a.position] || 99;
+            const bPriority = positionPriority[b.position] || 99;
+            return aPriority - bPriority;
+          })
+          .slice(0, 3);
+
+        // Calculate roster strength based on depth
+        const positions = this.groupPlayersByPosition(enrichedPlayers, league.roster_positions);
+        const avgDepthScore = positions.reduce((sum, pos) => sum + pos.depth_score, 0) / positions.length;
+        const strongPositions = positions.filter(pos => pos.strength === 'Strong').length;
+        const weakPositions = positions.filter(pos => pos.strength === 'Weak').length;
+
+        let overallStrength: 'Strong' | 'Average' | 'Weak';
+        if (strongPositions >= 4 && weakPositions <= 1) {
+          overallStrength = 'Strong';
+        } else if (weakPositions >= 3) {
+          overallStrength = 'Weak';
+        } else {
+          overallStrength = 'Average';
+        }
+
+        return {
+          roster,
+          ownerName,
+          isUserRoster,
+          enrichedPlayers,
+          starters,
+          bench,
+          keyPlayers,
+          overallStrength
+        };
+      })
+    );
+
+    // Sort by standings (wins, then points)
+    enrichedRosterData.sort((a, b) => {
+      const aWins = a.roster.settings.wins;
+      const bWins = b.roster.settings.wins;
+      if (aWins !== bWins) return bWins - aWins;
+
+      return b.roster.settings.fpts - a.roster.settings.fpts;
+    });
+
+    // Format output
+    const strengthEmoji = { 'Strong': '💪', 'Average': '⚖️', 'Weak': '⚠️' };
+
+    const teamSummaries = enrichedRosterData.map((data, index) => {
+      const { roster, ownerName, isUserRoster, keyPlayers, overallStrength } = data;
+      const userIndicator = isUserRoster ? ' ⭐ (You)' : '';
+
+      const keyPlayersText = keyPlayers.length > 0
+        ? keyPlayers.map(p => `${p.full_name} (${p.position})`).join(', ')
+        : 'No starters';
+
+      const winPct = roster.settings.wins / (roster.settings.wins + roster.settings.losses || 1) * 100;
+
+      return `${index + 1}. **${ownerName}${userIndicator}** (Roster #${roster.roster_id})\n` +
+             `   - Record: ${roster.settings.wins}-${roster.settings.losses}-${roster.settings.ties} (${winPct.toFixed(0)}%) | ` +
+             `Points: ${roster.settings.fpts.toFixed(1)}\n` +
+             `   - Key Players: ${keyPlayersText}\n` +
+             `   - Roster Strength: ${strengthEmoji[overallStrength || 'Average']} ${overallStrength || 'Average'}\n`;
+    });
+
+    // Find user's roster
+    const userRosterData = enrichedRosterData.find(d => d.isUserRoster);
+    const userRank = userRosterData ? enrichedRosterData.indexOf(userRosterData) + 1 : 'N/A';
+    const userRecord = userRosterData
+      ? `${userRosterData.roster.settings.wins}-${userRosterData.roster.settings.losses}-${userRosterData.roster.settings.ties}`
+      : 'N/A';
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `# ${league.name} - All Rosters\n\n` +
+                `**Total Teams:** ${rostersToShow.length}${rosters.length > 16 ? ' (showing first 16)' : ''}\n` +
+                `**Your Ranking:** #${userRank} (${userRecord})\n\n` +
+                `## Team Rankings\n\n` +
+                teamSummaries.join('\n') +
+                `\n---\n\n` +
+                `💡 **Tip:** Use a specific roster_id to see detailed player information for any team, ` +
+                `or omit roster_id to see only your roster.`
+        }
+      ]
+    };
+  }
+
+  /**
+   * Get detailed roster for a specific league
+   * Shows starters, bench, and player status information
+   * Can show user's roster, specific roster by ID, or all rosters
+   */
+  async getLeagueRoster(leagueId: string, rosterId?: number) {
+    try {
+      const userId = process.env.SLEEPER_USER_ID;
+
+      if (!userId) {
+        throw new Error('User ID not configured');
+      }
+
+      // Fetch league info, rosters, and users in parallel
+      const [league, rosters, users] = await Promise.all([
+        this.sleeperAPI.getLeague(leagueId),
+        this.sleeperAPI.getLeagueRosters(leagueId),
+        this.sleeperAPI.getLeagueUsers(leagueId)
+      ]);
+
+      // Check if roster_id is 0 (show all rosters)
+      if (rosterId === 0) {
+        return this.formatAllRosters(league, rosters, users, userId);
+      }
+
+      // Find target roster
+      let targetRoster: SleeperRoster | undefined;
+
+      if (rosterId !== undefined) {
+        // Find specific roster by ID
+        targetRoster = rosters.find(roster => roster.roster_id === rosterId);
+
+        if (!targetRoster) {
+          const validIds = rosters.map(r => r.roster_id).sort((a, b) => a - b).join(', ');
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `# ${league.name}\n\n` +
+                      `❌ **Roster #${rosterId} not found in this league.**\n\n` +
+                      `Valid roster IDs: ${validIds}\n\n` +
+                      `Use roster_id: 0 to see all rosters.`
+              }
+            ]
+          };
+        }
+      } else {
+        // Find user's roster
+        targetRoster = rosters.find(roster => roster.owner_id === userId);
+      }
+
+      const userRoster = targetRoster;
+
+      if (!userRoster) {
+        const message = rosterId !== undefined
+          ? `❌ **Roster #${rosterId} not found or has no owner.**`
+          : `❌ **You are not a member of this league.**\n\n` +
+            `If you believe this is an error, please verify your SLEEPER_USER_ID configuration.`;
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `# ${league.name}\n\n${message}`
+            }
+          ]
+        };
+      }
+
+      // Get owner display name
+      const owner = users.find(u => u.user_id === userRoster.owner_id);
+      const ownerName = owner?.display_name || owner?.username || 'Unknown Owner';
+
+      // Check if roster has players
+      if (!userRoster.players || userRoster.players.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `# ${league.name} - Your Roster\n\n` +
+                    `**Record:** ${userRoster.settings.wins}-${userRoster.settings.losses}-${userRoster.settings.ties}\n` +
+                    `**Roster ID:** #${userRoster.roster_id}\n\n` +
+                    `📭 **Your roster is empty.**\n\n` +
+                    `This league may be in pre-draft status or you haven't drafted yet.`
+            }
+          ]
+        };
+      }
+
+      // Get all unique player IDs
+      const allPlayerIds = Array.from(new Set([...userRoster.players, ...(userRoster.starters || [])]));
+
+      // Enrich players with details
+      const enrichedPlayers = await this.enrichPlayers(allPlayerIds, userRoster.starters || []);
+
+      // Separate starters and bench
+      const starters = enrichedPlayers.filter(p => p.is_starter);
+      const bench = enrichedPlayers.filter(p => !p.is_starter);
+
+      // Helper function to get status emoji
+      const getStatusEmoji = (status: string): string => {
+        switch (status) {
+          case 'Active': return '🟢';
+          case 'Questionable': return '⚠️';
+          case 'Doubtful': return '🟠';
+          case 'Out': return '🔴';
+          case 'IR': return '🔴';
+          case 'PUP': return '🔴';
+          case 'Inactive': return '⚫';
+          default: return '⚪';
+        }
+      };
+
+      // Helper function to group and format players by position
+      const formatPlayersByPosition = (players: EnrichedRosterPlayer[], title: string): string => {
+        if (players.length === 0) {
+          return `## ${title}\n\n_No players_\n\n`;
+        }
+
+        // Group by position
+        const positions = ['QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DEF'];
+        const grouped: { [key: string]: EnrichedRosterPlayer[] } = {};
+
+        // Initialize position groups
+        positions.forEach(pos => {
+          grouped[pos] = [];
+        });
+
+        // Add players to their position groups
+        players.forEach(player => {
+          const pos = player.position;
+          if (grouped[pos]) {
+            grouped[pos].push(player);
+          } else {
+            // For FLEX or unknown positions
+            if (!grouped['FLEX']) {
+              grouped['FLEX'] = [];
+            }
+            grouped['FLEX'].push(player);
+          }
+        });
+
+        let output = `## ${title}\n\n`;
+
+        // Format each position group
+        positions.forEach(position => {
+          if (grouped[position] && grouped[position].length > 0) {
+            output += `### ${position}\n`;
+            grouped[position].forEach(player => {
+              output += `- ${getStatusEmoji(player.status)} ${player.full_name} (${player.team}) - ${player.status}\n`;
+            });
+            output += '\n';
+          }
+        });
+
+        return output;
+      };
+
+      // Format the response
+      const startersSection = formatPlayersByPosition(starters, '🏈 Starters');
+      const benchSection = formatPlayersByPosition(bench, '📋 Bench');
+
+      const isUserRoster = userRoster.owner_id === userId;
+      const rosterTitle = isUserRoster ? 'Your Roster' : `${ownerName}'s Roster`;
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `# ${league.name} - ${rosterTitle}\n\n` +
+                  `**Owner:** ${ownerName}\n` +
+                  `**Record:** ${userRoster.settings.wins}-${userRoster.settings.losses}-${userRoster.settings.ties} | ` +
+                  `**Points For:** ${userRoster.settings.fpts.toFixed(1)} | ` +
+                  `**Roster ID:** #${userRoster.roster_id}\n\n` +
+                  startersSection +
+                  benchSection +
+                  `---\n\n` +
+                  `**Total Roster:** ${enrichedPlayers.length} players | ` +
+                  `**Starters:** ${starters.length} | ` +
+                  `**Bench:** ${bench.length}`
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`Failed to get league roster: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

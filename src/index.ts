@@ -143,6 +143,24 @@ class SleeperMCPServer {
                 },
                 required: []
             }
+         },
+         {
+            name: 'get_league_roster',
+            description: 'Get detailed roster information for a team in a specific league, including starters, bench players, player names, positions, teams, and injury status. Can show your roster, a specific team roster, or all rosters in the league.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    league_id: {
+                        type: 'string',
+                        description: 'The Sleeper league ID to get roster for'
+                    },
+                    roster_id: {
+                        type: 'number',
+                        description: 'Optional: specific roster ID to view (1-16). If not provided, shows your roster. Use 0 to see all rosters in the league as a summary.'
+                    }
+                },
+                required: ['league_id']
+            }
          }
         ]
       };
@@ -230,6 +248,44 @@ class SleeperMCPServer {
             }
 
             return this.sleeperTools.managePlayerCache(action);
+        }
+        case 'get_league_roster': {
+            // Validate that arguments exist and contain the required league_id
+            const args = request.params.arguments;
+
+            // Check if arguments exist at all
+            if (!args || typeof args !== 'object') {
+                throw new McpError(
+                    ErrorCode.InvalidParams,
+                    'get_league_roster requires arguments object'
+                );
+            }
+
+            // Check if league_id exists and is a string
+            const leagueId = (args as any).league_id;
+            if (!leagueId || typeof leagueId !== 'string') {
+                throw new McpError(
+                    ErrorCode.InvalidParams,
+                    'get_league_roster requires a valid league_id string parameter'
+                );
+            }
+
+            // Extract optional roster_id
+            let rosterId: number | undefined;
+            const providedRosterId = (args as any).roster_id;
+            if (providedRosterId !== undefined && providedRosterId !== null) {
+                if (typeof providedRosterId === 'number') {
+                    rosterId = providedRosterId;
+                } else {
+                    throw new McpError(
+                        ErrorCode.InvalidParams,
+                        'roster_id must be a number if provided'
+                    );
+                }
+            }
+
+            // Now we can safely call the method with validated data
+            return this.sleeperTools.getLeagueRoster(leagueId, rosterId);
         }
 
         default:
