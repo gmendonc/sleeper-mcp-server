@@ -129,7 +129,7 @@ export class PlayerCache {
    */
   async savePlayersToCache(players: Record<string, SleeperPlayer>): Promise<void> {
     try {
-      console.log(`Saving ${Object.keys(players).length} players to cache at ${this.cacheFilePath}`);
+      console.error(`Saving ${Object.keys(players).length} players to cache at ${this.cacheFilePath}`);
 
       // Ensure the data directory exists
       await fs.mkdir(path.dirname(this.cacheFilePath), { recursive: true });
@@ -153,7 +153,7 @@ export class PlayerCache {
       try {
         const testRead = await fs.readFile(tempFilePath, 'utf8');
         JSON.parse(testRead);
-        console.log('Cache file verified successfully');
+        console.error('Cache file verified successfully');
       } catch (verifyError) {
         console.error('Cache file verification failed:', verifyError);
         throw new Error('Cache file is corrupted after writing');
@@ -167,7 +167,7 @@ export class PlayerCache {
         this.playersCache.set(playerId, player);
       }
 
-      console.log(`Player cache saved successfully with ${Object.keys(players).length} players`);
+      console.error(`Player cache saved successfully with ${Object.keys(players).length} players`);
     } catch (error) {
       console.error('Failed to save players to cache:', error);
 

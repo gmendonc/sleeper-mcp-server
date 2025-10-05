@@ -212,6 +212,30 @@ export class SleeperAPI {
   }
 
   /**
+   * Get trending players (most added or dropped)
+   * @param type - 'add' or 'drop'
+   * @param lookbackHours - Hours to look back (default 24)
+   * @param limit - Number of results (default 25)
+   */
+  async getTrendingPlayers(
+    type: 'add' | 'drop' = 'add',
+    lookbackHours: number = 24,
+    limit: number = 100
+  ): Promise<Array<{ player_id: string; count: number }>> {
+    const cacheKey = `trending:${type}:${lookbackHours}:${limit}`;
+
+    return this.getCached(cacheKey, async () => {
+      const params = new URLSearchParams({
+        lookback_hours: lookbackHours.toString(),
+        limit: limit.toString()
+      });
+
+      const response = await this.client.get(`/players/nfl/trending/${type}?${params.toString()}`);
+      return response.data || [];
+    });
+  }
+
+  /**
    * Clear cache - useful for testing and forcing fresh data
    */
   clearCache(): void {

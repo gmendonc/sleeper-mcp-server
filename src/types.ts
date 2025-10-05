@@ -47,7 +47,7 @@ export interface SleeperPlayer {
   last_name: string;
   position: string;
   team: string;
-  status: 'Active' | 'Inactive' | 'IR' | 'PUP';
+  status: 'Active' | 'Inactive' | 'IR' | 'PUP' | 'Questionable' | 'Doubtful' | 'Out';
   fantasy_positions: string[];
 }
 
@@ -139,7 +139,7 @@ export interface EnrichedRosterPlayer {
   full_name: string;
   position: string;
   team: string;
-  status: 'Active' | 'Inactive' | 'IR' | 'PUP';
+  status: 'Active' | 'Inactive' | 'IR' | 'PUP' | 'Questionable' | 'Doubtful' | 'Out';
   fantasy_positions: string[];
   is_starter: boolean;
 }
@@ -205,4 +205,31 @@ export interface MultiRosterComparison {
     strengths: string[];
     weaknesses: string[];
   }[];
+}
+
+// Trending players from Sleeper API
+export interface TrendingPlayer {
+  player_id: string;
+  count: number;
+}
+
+// Waiver wire analysis types
+export interface WaiverPlayerTarget {
+  player_id: string;
+  full_name: string;
+  position: string;
+  team: string;
+  status: 'Active' | 'Inactive' | 'IR' | 'PUP' | 'Questionable' | 'Doubtful' | 'Out';
+  fantasy_positions: string[];
+  available_in_leagues: string[];
+  league_count: number;
+  priority_score: number;
+  recommended_for: string[];
+  trending_add_count?: number | undefined;
+}
+
+export interface WaiverAnalysis {
+  position: string;
+  top_targets: WaiverPlayerTarget[];
+  total_available: number;
 }

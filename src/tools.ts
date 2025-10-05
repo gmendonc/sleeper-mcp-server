@@ -12,7 +12,9 @@ import type {
   EnrichedRosterPlayer,
   PositionDepth,
   RosterAnalysis,
-  MultiRosterComparison
+  MultiRosterComparison,
+  WaiverPlayerTarget,
+  WaiverAnalysis
  } from './types.js';
 
 export class SleeperTools {
@@ -1133,6 +1135,327 @@ export class SleeperTools {
       }
     } catch (error) {
       throw new Error(`Failed to manage player cache: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Get waiver wire targets across all leagues
+   * Analyzes available players and prioritizes based on roster needs and multi-league availability
+   */
+  async getWaiverTargets(position?: string, limit: number = 5) {
+    try {
+      const configuredSeason = process.env.NFL_SEASON || '2025';
+      const userId = process.env.SLEEPER_USER_ID;
+
+      if (!userId) {
+        throw new Error('User ID not configured');
+      }
+
+      // Get all user leagues
+      const leagues = await this.sleeperAPI.getUserLeagues(userId, configuredSeason);
+
+      if (leagues.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No leagues found for user ${userId} in ${configuredSeason} season.`
+            }
+          ]
+        };
+      }
+
+      // Fetch all rosters across all leagues in parallel
+      const leagueRosterData = await Promise.all(
+        leagues.map(async (league) => {
+          try {
+            const rosters = await this.sleeperAPI.getLeagueRosters(league.league_id);
+            const userRoster = rosters.find(roster => roster.owner_id === userId);
+
+            // Get all rostered players in this league
+            const rosteredPlayerIds = new Set<string>();
+            rosters.forEach(roster => {
+              roster.players.forEach(playerId => rosteredPlayerIds.add(playerId));
+            });
+
+            return {
+              league,
+              userRoster,
+              rosteredPlayerIds,
+              allRosters: rosters
+            };
+          } catch (error) {
+            return null;
+          }
+        })
+      );
+
+      const validLeagueData = leagueRosterData.filter((data): data is NonNullable<typeof data> => data !== null);
+
+      // Get all players from the database
+      const allPlayers = await this.sleeperAPI.getPlayers();
+      const playerArray = Array.from(allPlayers.values());
+
+      // Fetch trending players (most added in last 24 hours)
+      const trendingAdds = await this.sleeperAPI.getTrendingPlayers('add', 24, 100);
+      const trendingMap = new Map<string, number>();
+      trendingAdds.forEach(({ player_id, count }) => {
+        trendingMap.set(player_id, count);
+      });
+
+      console.error(`Fetched ${trendingAdds.length} trending players`);
+
+      // Filter to only active NFL players in relevant positions
+      const positions = position ? [position] : ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
+
+      // First, collect all rostered player IDs across all leagues to understand who's taken
+      const allRosteredPlayerIds = new Set<string>();
+      validLeagueData.forEach(({ rosteredPlayerIds }) => {
+        rosteredPlayerIds.forEach(id => allRosteredPlayerIds.add(id));
+      });
+
+      // Get a sample of rostered players to understand scoring relevance
+      const rosteredPlayers = playerArray.filter(player => allRosteredPlayerIds.has(player.player_id));
+
+      // Create a whitelist of relevant NFL teams (active teams only)
+      const activeNFLTeams = new Set([
+        'ARI', 'ATL', 'BAL', 'BUF', 'CAR', 'CHI', 'CIN', 'CLE', 'DAL', 'DEN',
+        'DET', 'GB', 'HOU', 'IND', 'JAX', 'KC', 'LAC', 'LAR', 'LV', 'MIA',
+        'MIN', 'NE', 'NO', 'NYG', 'NYJ', 'PHI', 'PIT', 'SEA', 'SF', 'TB',
+        'TEN', 'WAS'
+      ]);
+
+      const relevantPlayers = playerArray.filter(player => {
+        // Must have valid position
+        const hasValidPosition = positions.some(pos =>
+          player.position === pos || player.fantasy_positions?.includes(pos)
+        );
+        if (!hasValidPosition) return false;
+
+        // Must be on an active NFL team
+        if (!player.team || !activeNFLTeams.has(player.team)) return false;
+
+        // Must be Active or Questionable status (healthy enough to play)
+        if (player.status !== 'Active' && player.status !== 'Questionable') return false;
+
+        // For skill positions, require years_exp data or injury_status to filter out practice squad
+        // This is a heuristic to focus on rostered NFL players
+        if (player.position === 'QB' || player.position === 'RB' ||
+            player.position === 'WR' || player.position === 'TE') {
+          // If player has no fantasy_positions array, likely not fantasy-relevant
+          if (!player.fantasy_positions || player.fantasy_positions.length === 0) return false;
+        }
+
+        return true;
+      });
+
+      // Analyze each player's availability across leagues
+      const waiverTargets: WaiverPlayerTarget[] = relevantPlayers
+        .map(player => {
+          const availableInLeagues: string[] = [];
+          const recommendedFor: string[] = [];
+
+          validLeagueData.forEach(({ league, userRoster, rosteredPlayerIds }) => {
+            // Check if player is available (not rostered by anyone)
+            if (!rosteredPlayerIds.has(player.player_id)) {
+              availableInLeagues.push(league.name);
+
+              // Check if user needs this position
+              if (userRoster) {
+                const userPlayerIds = userRoster.players || [];
+                const enrichedPlayers = userPlayerIds.map(id => allPlayers.get(id)).filter(p => p !== undefined);
+
+                const positionPlayers = enrichedPlayers.filter(p =>
+                  p.position === player.position || p.fantasy_positions?.includes(player.position)
+                );
+
+                // Recommend if user has fewer than 3 players at this position (simplified depth check)
+                if (positionPlayers.length < 3) {
+                  recommendedFor.push(league.name);
+                }
+              }
+            }
+          });
+
+          // Calculate priority score
+          // Higher score = better target
+          let priorityScore = 0;
+
+          // TRENDING DATA (MOST IMPORTANT)
+          const trendingCount = trendingMap.get(player.player_id) || 0;
+          if (trendingCount > 0) {
+            // Heavily weight trending players
+            // Players with 100+ adds get 1000+ points, making them top priorities
+            priorityScore += trendingCount * 10;
+          }
+
+          // Available in multiple leagues = higher value
+          priorityScore += availableInLeagues.length * 10;
+
+          // Needed for roster depth = higher value
+          priorityScore += recommendedFor.length * 15;
+
+          // Active status = higher value than questionable
+          if (player.status === 'Active') {
+            priorityScore += 5;
+          }
+
+          // Position scarcity adjustments
+          if (player.position === 'RB' || player.position === 'WR') {
+            priorityScore += 3; // These positions have more value
+          } else if (player.position === 'TE') {
+            priorityScore += 5; // TE is scarce
+          }
+
+          return {
+            player_id: player.player_id,
+            full_name: player.full_name || `${player.first_name} ${player.last_name}`,
+            position: player.position,
+            team: player.team,
+            status: player.status as any,
+            fantasy_positions: player.fantasy_positions || [player.position],
+            available_in_leagues: availableInLeagues,
+            league_count: availableInLeagues.length,
+            priority_score: priorityScore,
+            recommended_for: recommendedFor,
+            trending_add_count: trendingCount > 0 ? trendingCount : undefined
+          };
+        })
+        .filter(target => target.available_in_leagues.length > 0); // Only show players available somewhere
+
+      // Group by position
+      const positionGroups: { [key: string]: WaiverPlayerTarget[] } = {};
+      positions.forEach(pos => {
+        positionGroups[pos] = waiverTargets
+          .filter(target => target.position === pos || target.fantasy_positions.includes(pos))
+          .sort((a, b) => b.priority_score - a.priority_score)
+          .slice(0, limit);
+      });
+
+      // Format output
+      const formatPlayerTarget = (target: WaiverPlayerTarget): string => {
+        const availableCount = target.league_count;
+        const recommendedCount = target.recommended_for.length;
+        const trending = target.trending_add_count || 0;
+
+        let recommendation = '';
+        if (trending > 50) {
+          recommendation = ` 🔥 **TRENDING HOT** (${trending} adds across Sleeper)`;
+        } else if (trending > 10) {
+          recommendation = ` ⬆️ **Trending Up** (${trending} adds)`;
+        } else if (recommendedCount > 0) {
+          recommendation = ` 🎯 **Fills roster need** (depth in ${recommendedCount} league${recommendedCount > 1 ? 's' : ''})`;
+        } else if (availableCount >= 2) {
+          recommendation = ` 📌 Multi-league option`;
+        }
+
+        let leaguesText = `Available in ${availableCount} league${availableCount > 1 ? 's' : ''}`;
+        if (availableCount <= 3) {
+          leaguesText += `: ${target.available_in_leagues.join(', ')}`;
+        } else {
+          leaguesText += `: ${target.available_in_leagues.slice(0, 2).join(', ')} +${availableCount - 2} more`;
+        }
+
+        return `- **${target.full_name}** (${target.team})${recommendation}\n` +
+               `  - ${leaguesText}\n` +
+               `  - Status: ${target.status}${trending > 0 ? ` | Trending: ${trending} adds in 24h` : ''} | Score: ${target.priority_score}`;
+      };
+
+      // Count total unique available players
+      const totalAvailablePlayers = waiverTargets.length;
+
+      let outputText = `# Waiver Wire Targets Analysis\n\n`;
+      outputText += `**Leagues Analyzed:** ${validLeagueData.length}\n`;
+      outputText += `**Position Filter:** ${position || 'All Positions'}\n`;
+      outputText += `**Total Available Players Found:** ${totalAvailablePlayers}\n\n`;
+
+      // Show league names for reference
+      if (validLeagueData.length > 0) {
+        outputText += `**Your Leagues:**\n`;
+        validLeagueData.forEach(({ league }, idx) => {
+          outputText += `${idx + 1}. ${league.name}\n`;
+        });
+        outputText += '\n';
+      }
+
+      // Show analysis for each position
+      positions.forEach(pos => {
+        const targets = positionGroups[pos];
+        if (targets && targets.length > 0) {
+          outputText += `## ${pos} Targets (Top ${Math.min(limit, targets.length)} of ${waiverTargets.filter(t => t.position === pos).length} available)\n\n`;
+          targets.forEach(target => {
+            outputText += formatPlayerTarget(target) + '\n\n';
+          });
+        } else {
+          outputText += `## ${pos} Targets\n\n_No available players found at this position_\n\n`;
+        }
+      });
+
+      // Add HOTTEST TRENDING section FIRST (most important!)
+      const trendingTargets = waiverTargets
+        .filter(target => (target.trending_add_count || 0) > 5)
+        .sort((a, b) => (b.trending_add_count || 0) - (a.trending_add_count || 0))
+        .slice(0, 10);
+
+      if (trendingTargets.length > 0) {
+        outputText += `## 🔥 HOTTEST ADDS (Last 24 Hours)\n\n`;
+        outputText += `These players are being added heavily across Sleeper right now:\n\n`;
+        trendingTargets.forEach(target => {
+          const trending = target.trending_add_count || 0;
+          const availableIn = target.available_in_leagues.length > 0
+            ? ` - Available in: ${target.available_in_leagues.slice(0, 2).join(', ')}${target.available_in_leagues.length > 2 ? '...' : ''}`
+            : ' - NOT available in your leagues';
+          outputText += `- **${target.full_name}** (${target.position}, ${target.team}) - **${trending} adds**${availableIn}\n`;
+        });
+        outputText += '\n';
+      }
+
+      // Add recommendations section
+      const highPriorityTargets = waiverTargets
+        .filter(target => target.recommended_for.length > 0)
+        .sort((a, b) => b.priority_score - a.priority_score)
+        .slice(0, 5);
+
+      if (highPriorityTargets.length > 0) {
+        outputText += `## 🎯 Top Priority Recommendations\n\n`;
+        outputText += `These players address roster needs in multiple leagues:\n\n`;
+        highPriorityTargets.forEach(target => {
+          const trending = target.trending_add_count || 0;
+          outputText += `- **${target.full_name}** (${target.position}, ${target.team})${trending > 0 ? ` [${trending} adds]` : ''}\n`;
+          outputText += `  - Recommended for: ${target.recommended_for.join(', ')}\n`;
+        });
+        outputText += '\n';
+      }
+
+      // Add multi-league opportunities
+      const multiLeagueTargets = waiverTargets
+        .filter(target => target.league_count >= 2)
+        .sort((a, b) => b.league_count - a.league_count)
+        .slice(0, 5);
+
+      if (multiLeagueTargets.length > 0) {
+        outputText += `## 📌 Multi-League Opportunities\n\n`;
+        outputText += `These players are available in multiple leagues (efficiency targets):\n\n`;
+        multiLeagueTargets.forEach(target => {
+          outputText += `- **${target.full_name}** (${target.position}, ${target.team}) - Available in ${target.league_count} leagues\n`;
+        });
+        outputText += '\n';
+      }
+
+      outputText += `---\n\n`;
+      outputText += `💡 **Pro Tip**: Prioritize players that appear in both "Top Priority" and "Multi-League" sections ` +
+                    `to maximize your waiver claim efficiency across all your leagues.`;
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: outputText
+          }
+        ]
+      };
+    } catch (error) {
+      throw new Error(`Failed to get waiver targets: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 }

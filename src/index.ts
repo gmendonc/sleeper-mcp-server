@@ -161,6 +161,26 @@ class SleeperMCPServer {
                 },
                 required: ['league_id']
             }
+         },
+         {
+            name: 'get_waiver_targets',
+            description: 'Analyze available players across all leagues and identify the best waiver wire targets based on roster needs, player availability, and league scoring settings. Prioritizes players available in multiple leagues.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    position: {
+                        type: 'string',
+                        description: 'Optional: filter by position (QB, RB, WR, TE, K, DEF). If not provided, shows top targets for all positions.',
+                        enum: ['QB', 'RB', 'WR', 'TE', 'K', 'DEF']
+                    },
+                    limit: {
+                        type: 'number',
+                        description: 'Optional: number of players to show per position (default: 5)',
+                        default: 5
+                    }
+                },
+                required: []
+            }
          }
         ]
       };
@@ -286,6 +306,28 @@ class SleeperMCPServer {
 
             // Now we can safely call the method with validated data
             return this.sleeperTools.getLeagueRoster(leagueId, rosterId);
+        }
+        case 'get_waiver_targets': {
+            // Arguments are optional, but if they exist, validate them
+            const args = request.params.arguments;
+            let position: string | undefined;
+            let limit: number = 5;
+
+            if (args && typeof args === 'object') {
+                const providedPosition = (args as any).position;
+                if (providedPosition && typeof providedPosition === 'string') {
+                    if (['QB', 'RB', 'WR', 'TE', 'K', 'DEF'].includes(providedPosition)) {
+                        position = providedPosition;
+                    }
+                }
+
+                const providedLimit = (args as any).limit;
+                if (providedLimit && typeof providedLimit === 'number' && providedLimit > 0) {
+                    limit = providedLimit;
+                }
+            }
+
+            return this.sleeperTools.getWaiverTargets(position, limit);
         }
 
         default:
